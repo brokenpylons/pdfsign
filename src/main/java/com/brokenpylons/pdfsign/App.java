@@ -1,14 +1,14 @@
 package com.brokenpylons.pdfsign;
+import java.awt.*;
+import java.awt.geom.AffineTransform;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.security.*;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import java.util.Arrays;
-import java.util.Calendar;
-import java.util.Collection;
-import java.util.Collections;
+import java.util.*;
+import java.util.List;
 
 import org.apache.pdfbox.cos.COSArray;
 import org.apache.pdfbox.cos.COSBase;
@@ -16,9 +16,25 @@ import org.apache.pdfbox.cos.COSDictionary;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.io.IOUtils;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.common.PDStream;
+import org.apache.pdfbox.pdmodel.font.PDFont;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream;
 import org.apache.pdfbox.pdmodel.interactive.digitalsignature.PDSignature;
 import org.apache.pdfbox.pdmodel.interactive.digitalsignature.SignatureOptions;
 import org.apache.pdfbox.pdmodel.interactive.digitalsignature.SignatureInterface;
+import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
+import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDSignatureField;
+import org.apache.pdfbox.util.Matrix;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.cms.CMSObjectIdentifiers;
 import org.bouncycastle.cert.jcajce.JcaCertStore;
@@ -48,59 +64,18 @@ class Sign implements SignatureInterface {
         }
     }
 
-    public class CMSProcessableInputStream implements CMSTypedData {
-        private final InputStream inputStream;
-        private final ASN1ObjectIdentifier contentType;
-
-        CMSProcessableInputStream(InputStream is) {
-            this(new ASN1ObjectIdentifier(CMSObjectIdentifiers.data.getId()), is);
-        }
-
-        private CMSProcessableInputStream(ASN1ObjectIdentifier type, InputStream is) {
-            contentType = type;
-            inputStream = is;
-        }
-
-        @Override
-        public Object getContent() {
-            return inputStream;
-        }
-
-        @Override
-        public void write(OutputStream out) throws IOException {
-            // read the content only one time
-            IOUtils.copy(inputStream, out);
-            inputStream.close();
-        }
-
-        @Override
-        public ASN1ObjectIdentifier getContentType() {
-            return contentType;
-        }
-    }
-
     @Override
     public byte[] sign(final InputStream input) throws IOException {
         try {
-            /*var generator = new CMSSignedDataGenerator();
+            var generator = new CMSSignedDataGenerator();
             var signer = new JcaContentSignerBuilder("SHA256WithRSA").build(key);
-            var calculator = new JcaDigestCalculatorProviderBuilder().build();
-            generator.addSignerInfoGenerator(new JcaSignerInfoGeneratorBuilder(calculator).build(signer, certificate));
+            var digestCalculator = new JcaDigestCalculatorProviderBuilder().build();
+            generator.addSignerInfoGenerator(new JcaSignerInfoGeneratorBuilder(digestCalculator).build(signer, certificate));
             generator.addCertificates(new JcaCertStore(Arrays.asList(this.certificateChain)));
 
             var stream = new CMSProcessableByteArray(input.readAllBytes());
             var data = generator.generate(stream);
-            return data.getEncoded();*/
-
-            CMSSignedDataGenerator gen = new CMSSignedDataGenerator();
-            X509Certificate cert = (X509Certificate) this.certificateChain[0];
-            ContentSigner sha1Signer = new JcaContentSignerBuilder("SHA256WithRSA").build(this.key);
-            gen.addSignerInfoGenerator(new JcaSignerInfoGeneratorBuilder(new JcaDigestCalculatorProviderBuilder().build()).build(sha1Signer, cert));
-            gen.addCertificates(new JcaCertStore(Arrays.asList(this.certificateChain)));
-            CMSProcessableInputStream msg = new CMSProcessableInputStream(input);
-            CMSSignedData signedData = gen.generate(msg, false);
-            return signedData.getEncoded();
-
+            return data.getEncoded();
         } catch (GeneralSecurityException | OperatorCreationException | CMSException e) {
             throw new RuntimeException(e);
         }
@@ -109,118 +84,156 @@ class Sign implements SignatureInterface {
 
 public class App 
 {
-    public static void createVisualSignature() {
-
-    }
-
-    public static int getMDPPermission(PDDocument doc)
+    // create a template PDF document with empty signature and return it as a stream.
+    private static InputStream createVisualSignatureTemplate(PDDocument srcDoc, int pageNum,
+                                                             PDRectangle rect, PDSignature signature) throws IOException
     {
-        COSBase base = doc.getDocumentCatalog().getCOSObject().getDictionaryObject(COSName.PERMS);
-        if (base instanceof COSDictionary)
+        try (PDDocument doc = new PDDocument())
         {
-            COSDictionary permsDict = (COSDictionary) base;
-            base = permsDict.getDictionaryObject(COSName.DOCMDP);
-            if (base instanceof COSDictionary)
+            PDPage page = new PDPage(srcDoc.getPage(pageNum).getMediaBox());
+            doc.addPage(page);
+            PDAcroForm acroForm = new PDAcroForm(doc);
+            doc.getDocumentCatalog().setAcroForm(acroForm);
+            PDSignatureField signatureField = new PDSignatureField(acroForm);
+            PDAnnotationWidget widget = signatureField.getWidgets().get(0);
+            List<PDField> acroFormFields = acroForm.getFields();
+            acroForm.setSignaturesExist(true);
+            acroForm.setAppendOnly(true);
+            acroForm.getCOSObject().setDirect(true);
+            acroFormFields.add(signatureField);
+
+            widget.setRectangle(rect);
+
+            // from PDVisualSigBuilder.createHolderForm()
+            PDStream stream = new PDStream(doc);
+            PDFormXObject form = new PDFormXObject(stream);
+            PDResources res = new PDResources();
+            form.setResources(res);
+            form.setFormType(1);
+            PDRectangle bbox = new PDRectangle(rect.getWidth(), rect.getHeight());
+            float height = bbox.getHeight();
+            Matrix initialScale = null;
+            switch (srcDoc.getPage(pageNum).getRotation())
             {
-                COSDictionary signatureDict = (COSDictionary) base;
-                base = signatureDict.getDictionaryObject("Reference");
-                if (base instanceof COSArray)
-                {
-                    COSArray refArray = (COSArray) base;
-                    for (int i = 0; i < refArray.size(); ++i)
-                    {
-                        base = refArray.getObject(i);
-                        if (base instanceof COSDictionary)
-                        {
-                            COSDictionary sigRefDict = (COSDictionary) base;
-                            if (COSName.DOCMDP.equals(sigRefDict.getDictionaryObject("TransformMethod")))
-                            {
-                                base = sigRefDict.getDictionaryObject("TransformParams");
-                                if (base instanceof COSDictionary)
-                                {
-                                    COSDictionary transformDict = (COSDictionary) base;
-                                    int accessPermissions = transformDict.getInt(COSName.P, 2);
-                                    if (accessPermissions < 1 || accessPermissions > 3)
-                                    {
-                                        accessPermissions = 2;
-                                    }
-                                    return accessPermissions;
-                                }
-                            }
-                        }
-                    }
-                }
+                case 90:
+                    form.setMatrix(AffineTransform.getQuadrantRotateInstance(1));
+                    initialScale = Matrix.getScaleInstance(bbox.getWidth() / bbox.getHeight(), bbox.getHeight() / bbox.getWidth());
+                    height = bbox.getWidth();
+                    break;
+                case 180:
+                    form.setMatrix(AffineTransform.getQuadrantRotateInstance(2));
+                    break;
+                case 270:
+                    form.setMatrix(AffineTransform.getQuadrantRotateInstance(3));
+                    initialScale = Matrix.getScaleInstance(bbox.getWidth() / bbox.getHeight(), bbox.getHeight() / bbox.getWidth());
+                    height = bbox.getWidth();
+                    break;
+                case 0:
+                default:
+                    break;
             }
+            form.setBBox(bbox);
+            PDFont font = PDType1Font.HELVETICA_BOLD;
+
+            // from PDVisualSigBuilder.createAppearanceDictionary()
+            PDAppearanceDictionary appearance = new PDAppearanceDictionary();
+            appearance.getCOSObject().setDirect(true);
+            PDAppearanceStream appearanceStream = new PDAppearanceStream(form.getCOSObject());
+            appearance.setNormalAppearance(appearanceStream);
+            widget.setAppearance(appearance);
+
+            try (PDPageContentStream cs = new PDPageContentStream(doc, appearanceStream))
+            {
+                // for 90Ã‚Â° and 270Ã‚Â° scale ratio of width / height
+                // not really sure about this
+                // why does scale have no effect when done in the form matrix???
+                if (initialScale != null)
+                {
+                    cs.transform(initialScale);
+                }
+
+                // show background (just for debugging, to see the rect size + position)
+                cs.setNonStrokingColor(Color.yellow);
+                cs.addRect(-5000, -5000, 10000, 10000);
+                cs.fill();
+
+                // show background image
+                // save and restore graphics if the image is too large and needs to be scaled
+                cs.saveGraphicsState();
+                cs.transform(Matrix.getScaleInstance(0.25f, 0.25f));
+                //PDImageXObject img = PDImageXObject.createFromFileByExtension(new File("image.png"), doc);
+                //cs.drawImage(img, 0, 0);
+                cs.restoreGraphicsState();
+
+                // show text
+                float fontSize = 10;
+                float leading = fontSize * 1.5f;
+                cs.beginText();
+                cs.setFont(font, fontSize);
+                cs.setNonStrokingColor(Color.black);
+                cs.newLineAtOffset(fontSize, height - leading);
+                cs.setLeading(leading);
+
+                /*X509Certificate cert = (X509Certificate) getCertificateChain()[0];
+
+                // https://stackoverflow.com/questions/2914521/
+                X500Name x500Name = new X500Name(cert.getSubjectX500Principal().getName());
+                RDN cn = x500Name.getRDNs(BCStyle.CN)[0];*/
+                String name = ""; // IETFUtils.valueToString(cn.getFirst().getValue());
+
+                // See https://stackoverflow.com/questions/12575990
+                // for better date formatting
+                String date = signature.getSignDate().getTime().toString();
+                String reason = signature.getReason();
+
+                cs.showText("Signer: " + name);
+                cs.newLine();
+                cs.showText(date);
+                cs.newLine();
+                //cs.showText("Reason: " + reason);
+
+                cs.endText();
+            }
+
+            // no need to set annotations and /P entry
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            doc.save(baos);
+            return new ByteArrayInputStream(baos.toByteArray());
         }
-        return 0;
-    }
-
-    public static void setMDPPermission(PDDocument doc, PDSignature signature, int accessPermissions)
-    {
-        COSDictionary sigDict = signature.getCOSObject();
-
-        // DocMDP specific stuff
-        COSDictionary transformParameters = new COSDictionary();
-        transformParameters.setItem(COSName.TYPE, COSName.getPDFName("TransformParams"));
-        transformParameters.setInt(COSName.P, accessPermissions);
-        transformParameters.setName(COSName.V, "1.2");
-        transformParameters.setNeedToBeUpdated(true);
-
-        COSDictionary referenceDict = new COSDictionary();
-        referenceDict.setItem(COSName.TYPE, COSName.getPDFName("SigRef"));
-        referenceDict.setItem("TransformMethod", COSName.DOCMDP);
-        referenceDict.setItem("DigestMethod", COSName.getPDFName("SHA1"));
-        referenceDict.setItem("TransformParams", transformParameters);
-        referenceDict.setNeedToBeUpdated(true);
-
-        COSArray referenceArray = new COSArray();
-        referenceArray.add(referenceDict);
-        sigDict.setItem("Reference", referenceArray);
-        referenceArray.setNeedToBeUpdated(true);
-
-        // Catalog
-        COSDictionary catalogDict = doc.getDocumentCatalog().getCOSObject();
-        COSDictionary permsDict = new COSDictionary();
-        catalogDict.setItem(COSName.PERMS, permsDict);
-        permsDict.setItem(COSName.DOCMDP, signature);
-        catalogDict.setNeedToBeUpdated(true);
-        permsDict.setNeedToBeUpdated(true);
     }
 
     public static void sign(InputStream input, OutputStream output, SignatureInterface signatureInterface) throws IOException {
         PDDocument document = PDDocument.load(input);
-        int accessPermissions = getMDPPermission(document);
-        if (accessPermissions == 1)
-        {
-            throw new IllegalStateException("No changes to the document are permitted due to DocMDP transform parameters dictionary");
-        }
         PDSignature signature = new PDSignature();
         signature.setFilter(PDSignature.FILTER_ADOBE_PPKLITE);
         signature.setSubFilter(PDSignature.SUBFILTER_ADBE_PKCS7_DETACHED);
 
-        signature.setName("Name");
-        signature.setLocation("Location");
-        signature.setReason("Reason");
-        signature.setSignDate(Calendar.getInstance());
+        signature.setName("");
+        signature.setLocation("");
+        //signature.setReason("Reason");
 
-        if (accessPermissions == 0)
-        {
-            setMDPPermission(document, signature, 2);
-        }
+        var calendar = Calendar.getInstance();
+        calendar.setTimeZone(TimeZone.getTimeZone("Europe/Ljubljana"));
+        signature.setSignDate(calendar);
 
-        /*SignatureOptions signatureOptions = new SignatureOptions();
-        signatureOptions.setPage(0);*/
+
         SignatureOptions signatureOptions = new SignatureOptions();
-         	            // Size can vary, but should be enough for purpose.
-         	            signatureOptions.setPreferredSignatureSize(SignatureOptions.DEFAULT_SIGNATURE_SIZE * 2);
+        signatureOptions.setPage(0);
+        signatureOptions.setVisualSignature(createVisualSignatureTemplate(document, 0, new PDRectangle(100, 150, 170, 50), signature));
+        //signatureOptions.setPreferredSignatureSize(SignatureOptions.DEFAULT_SIGNATURE_SIZE * 2);
+
         document.addSignature(signature, signatureInterface, signatureOptions);
         document.saveIncremental(output);
     }
 
     public static void main(String[] args) {
 
-        File inputFile = new File("test.pdf");
-        File outputFile = new File("test_sig.pdf");
+        File inputFile = new File("");
+        File outputFile = new File("");
+        File keystoreFile = new File("");
+        String password = "";
+        String alias = "";
 
         try (FileInputStream inputStream = new FileInputStream(inputFile);
              FileOutputStream outputStream = new FileOutputStream(outputFile)) {
