@@ -49,6 +49,12 @@
       <artifactId>bcpkix-jdk15on</artifactId>
       <version>1.64</version>
     </dependency>
+
+    <dependency>
+      <groupId>info.picocli</groupId>
+      <artifactId>picocli</artifactId>
+      <version>4.5.1</version>
+    </dependency>
   </dependencies>
 
   <build>
@@ -100,8 +106,8 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
-          <source>10</source>
-          <target>10</target>
+          <source>11</source>
+          <target>11</target>
         </configuration>
       </plugin>
     </plugins>
